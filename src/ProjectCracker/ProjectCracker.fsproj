@@ -2,22 +2,20 @@
   <PropertyGroup>
     <TargetFramework>netcoreapp2.0</TargetFramework>
   </PropertyGroup>
-
+  <ItemGroup>
+    <ProjectReference Include="..\LSP\LSP.fsproj" />
+  </ItemGroup>
   <ItemGroup>
     <Compile Include="ProjectCracker.fs" />
   </ItemGroup>
-
   <ItemGroup>
-    <PackageReference Include="Buildalyzer" Version="0.4.0" />
-    <!-- Fix warnings from Buildalyzer indirect refs to old versions -->
+    <PackageReference Include="Dotnet.ProjInfo" Version="0.33.0" />
+    <PackageReference Include="Dotnet.ProjInfo.Workspace" Version="0.33.0" />
+    <PackageReference Include="FSharp.Compiler.Service" Version="28.0.0" />
     <PackageReference Include="System.Threading.ThreadPool" Version="4.3.0" />
     <PackageReference Include="System.Net.NameResolution" Version="4.3.0" />
     <PackageReference Include="System.Security.Principal" Version="4.3.0" />
     <PackageReference Include="System.IO.FileSystem.Primitives" Version="4.3.0" />
     <PackageReference Include="System.IO.FileSystem" Version="4.3.0" />
-  </ItemGroup>
-  
-  <ItemGroup>
-    <ProjectReference Include="..\LSP\LSP.fsproj" />
   </ItemGroup>
 </Project>

@@ -7,13 +7,9 @@ open System
 open System.IO
 open System.Text.RegularExpressions
 open System.Diagnostics
-open Microsoft.Build
-open Microsoft.Build.Evaluation
-open Microsoft.Build.Utilities
-open Microsoft.Build.Framework
-open Microsoft.Build.Logging
-open Buildalyzer
 open NUnit.Framework
+open System.Collections.Concurrent
+open FSharp.Compiler.ErrorLogger
 
 [<SetUp>]
 let setup() = 
@@ -24,62 +20,106 @@ let containsFileName(name: string, files: FileInfo list) =
   List.exists test files
 
 
+let crack fsproj = ProjectCracker.load (ConcurrentDictionary<_,_>()) fsproj
+
+let getTargetDllFromOpts (options:FSharp.Compiler.SourceCodeServices.FSharpProjectOptions) = 
+    match options.ExtraProjectInfo with
+    | Some opt -> 
+        let extraData = unbox<ExtraProjectInfoData>(opt)
+        match extraData.ProjectSdkType with 
+        | ProjectCracker.ProjectSdkType.DotnetSdk sdkProj -> 
+            FileInfo(sdkProj.TargetPath).Name
+    | None -> failwith "Expected target"
+
+let getReferences (otherOptions: string []) =
+    [ for o in otherOptions do
+        if o.StartsWith("-r:") then
+            yield FileInfo(o.[3..]).Name ]
+
 [<Test>]
 let ``crack a project file``() = 
     let fsproj = Path.Combine [|projectRoot.FullName; "sample"; "MainProject"; "MainProject.fsproj"|] |> FileInfo 
-    let cracked = ProjectCracker.crack(fsproj)
-    // Direct project reference
-    let projectNames = [for f in cracked.projectReferences do yield f.Name]
-    if not(List.contains "DependsOn.fsproj" projectNames) then
-        Assert.Fail(sprintf "No DependsOn.fsproj in %A" cracked.projectReferences)
-    // Transitive dependency
-    if not(List.contains "IndirectDep.fsproj" projectNames) then
-        Assert.Fail(sprintf "No IndirectDep.fsproj in %A" cracked.projectReferences)
-    // Output dll
-    Assert.AreEqual("MainProject.dll", cracked.target.Name)
+    let crackResult = crack fsproj.FullName
+    match crackResult with 
+    | Result.Ok (options, compileFiles, log) -> 
+        // Direct project reference
+        // printfn "%A" options
+        let projectNames = [for f in options.ReferencedProjects 
+                                do yield FileInfo((snd f).ProjectFileName).Name]
+        if not(List.contains "DependsOn.fsproj" projectNames) then
+            Assert.Fail(sprintf "No DependsOn.fsproj in %A" projectNames)
+        // Transitive dependency
+        if not(List.contains "IndirectDep.fsproj" projectNames) then
+            Assert.Fail(sprintf "No IndirectDep.fsproj in %A" projectNames)
+        // Output dll
+        Assert.AreEqual("MainProject.dll", getTargetDllFromOpts options)
+    | Result.Error (_) -> Assert.Fail "Error cracking project"
 
 [<Test>]
 let ``crack a project file with case insensitive package references`` () =
     let fsproj = Path.Combine [|projectRoot.FullName; "sample"; "HasPackageReference"; "HasPackageReference.fsproj" |] |> FileInfo
-    let cracked = ProjectCracker.crack(fsproj)
-    CollectionAssert.Contains([for f in cracked.packageReferences do yield f.Name], "Logary.dll")
+    let crackResult = crack (fsproj.FullName)
+    match crackResult with 
+    | Result.Ok (options, compileFiles, log) ->
+        let references = getReferences(options.OtherOptions)
+        CollectionAssert.Contains(references, "Logary.dll")
+    | Result.Error (_) -> Assert.Fail "Error cracking project"
+
 
 [<Test>]
 let ``find compile sources``() = 
     let fsproj = Path.Combine [|projectRoot.FullName; "sample"; "IndirectDep"; "IndirectDep.fsproj"|] |> FileInfo 
-    let cracked = ProjectCracker.crack(fsproj)
-    CollectionAssert.AreEquivalent(["IndirectLibrary.fs"], [for f in cracked.sources do yield f.Name])
+    let crackResult = crack (fsproj.FullName)
+    match crackResult with 
+    | Result.Ok (options, compileFiles, log) ->
+        let sourceNames = compileFiles |> List.map (fun p -> FileInfo(p).Name)
+        CollectionAssert.Contains(sourceNames, "IndirectLibrary.fs")
+    | Result.Error (_) -> Assert.Fail "Error cracking project"
 
 [<Test>]
 let ``find reference includes``() = 
     let fsproj = Path.Combine [|projectRoot.FullName; "sample"; "HasLocalDll"; "HasLocalDll.fsproj"|] |> FileInfo 
-    let cracked = ProjectCracker.crack(fsproj)
-    CollectionAssert.AreEquivalent(["IndirectDep.dll"], [for f in cracked.directReferences do yield f.Name])
+    let crackResult = crack (fsproj.FullName)
+    match crackResult with 
+    | Result.Ok (options, _, _) ->
+        let references = getReferences(options.OtherOptions)
+        CollectionAssert.Contains(references, "IndirectDep.dll")
+    | Result.Error (_) -> Assert.Fail "Error cracking project"
 
 [<Test>]
 let ``find CSharp reference``() = 
     let fsproj = Path.Combine [|projectRoot.FullName; "sample"; "ReferenceCSharp"; "ReferenceCSharp.fsproj"|] |> FileInfo 
-    let cracked = ProjectCracker.crack(fsproj)
-    CollectionAssert.AreEquivalent(["CSharpProject.dll"], [for f in cracked.otherProjectReferences do yield f.Name])
+    let crackResult = crack (fsproj.FullName)
+    match crackResult with 
+    | Result.Ok (options, _, _) ->
+        let references = getReferences(options.OtherOptions)
+        CollectionAssert.Contains(references, "CSharpProject.dll")
+    | Result.Error (_) -> Assert.Fail "Error cracking project"
 
 [<Test>]
 let ``find CSharp reference with modified AssemblyName``() = 
     let fsproj = Path.Combine [|projectRoot.FullName; "sample"; "ReferenceCSharp.AssemblyName"; "ReferenceCSharp.AssemblyName.fsproj"|] |> FileInfo 
-    let cracked = ProjectCracker.crack(fsproj)
-    CollectionAssert.AreEquivalent(["CSharpProject.AssemblyName.Modified.dll"], [for f in cracked.otherProjectReferences do yield f.Name])
+    let crackResult = crack (fsproj.FullName)
+    match crackResult with 
+    | Result.Ok (options, _, _) ->
+        let references = getReferences(options.OtherOptions)
+        CollectionAssert.Contains(references, "CSharpProject.AssemblyName.Modified.dll")
+    | Result.Error (_) -> Assert.Fail "Error cracking project"
 
 [<Test>]
 let ``resolve template params``() = 
     let fsproj = Path.Combine [|projectRoot.FullName; "sample"; "TemplateParams"; "TemplateParams.fsproj"|] |> FileInfo 
-    let cracked = ProjectCracker.crack(fsproj)
-    let expected = [
-        Path.Combine([|projectRoot.FullName; "src"; "fsharp"; "QueueList.fs"|]); 
-        Path.Combine([|projectRoot.FullName; "sample"; "TemplateParams"; "netstandard2.0"; "pars.fs"|])
-    ]
-    let actual = [for f in cracked.sources do yield f.FullName]
-    CollectionAssert.AreEquivalent(expected, actual)
+    let crackResult = crack (fsproj.FullName)
+    match crackResult with 
+    | Result.Ok (options, compileFiles, log) ->
+        let expected = [
+            Path.Combine([|projectRoot.FullName; "src"; "fsharp"; "QueueList.fs"|]); 
+            Path.Combine([|projectRoot.FullName; "sample"; "TemplateParams"; "netstandard2.0"; "pars.fs"|])
+        ]
+        CollectionAssert.AreEquivalent(expected, compileFiles)
+    | Result.Error (e) -> Assert.Fail (sprintf "Error cracking project: %s" e)
 
-// Check that project.assets.json-based ProjectCracker finds same .dlls as MSBuild
+// Check that project.assets.json-based ProjectCrackerDS finds same .dlls as MSBuild
 
 let clean(fsproj: FileInfo) = 
     let args = sprintf "clean %s" fsproj.FullName
@@ -122,15 +162,20 @@ let msbuild(fsproj: FileInfo): string list =
             references.Clear()
         if line.Trim().StartsWith("-r:") then 
             references.Add(line.Trim().Substring("-r:".Length))
-    // Filter out project-to-project references, these are handled separately by ProjectCracker
+    // Filter out project-to-project references, these are handled separately by ProjectCrackerDS
     [ for r in references do 
         if not(r.Contains("bin/Debug/netcoreapp2.0")) then 
             yield r ]
     
 let cracker(fsproj: FileInfo): string list = 
-    let cracked = ProjectCracker.crack(fsproj)
-    [ for f in cracked.packageReferences do 
-        yield f.FullName ]
+    let crackResult = crack (fsproj.FullName)
+    match crackResult with 
+    | Result.Ok (options, compileFiles, log) ->
+        [ for o in options.OtherOptions do
+            if o.StartsWith("-r:") then
+                yield o.[3..]]
+    | Result.Error (e) ->
+        failwith "Failed to crack project"
         
 [<Test>]
 let ``find package references in EmptyProject``() = 
@@ -145,7 +190,8 @@ let ``find package references in FSharpKoans``() =
 [<Test>]
 let ``error for unbuilt project``() = 
     let fsproj = Path.Combine [|projectRoot.FullName; "sample"; "NotBuilt"; "NotBuilt.fsproj"|] |> FileInfo 
-    let cracked = ProjectCracker.crack(fsproj)
-    match cracked.error with 
-    | None -> Assert.Fail("Should have failed to crack unbuilt project")
-    | Some(e) -> StringAssert.Contains("project.assets.json does not exist", e)
+    let crackResult = crack (fsproj.FullName)
+    match crackResult with 
+    | Result.Ok (options, compileFiles, log) ->
+        Assert.Fail("Should have failed to crack unbuilt project")
+    | Result.Error (e) -> StringAssert.Contains("not restored", e)

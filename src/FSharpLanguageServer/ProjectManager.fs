@@ -12,6 +12,8 @@ open FSharp.Data.JsonExtensions
 open LSP.Types
 open FSharp.Compiler.SourceCodeServices
 open ProjectCracker
+open System.Collections.Concurrent
+open Microsoft.VisualBasic.CompilerServices
 
 type private ResolvedProject = {
     sources: FileInfo list
@@ -45,6 +47,10 @@ type ProjectManager(checker: FSharpChecker) =
     let knownProjects = new HashSet<String>()
     //// Cache expensive analyze operations
     let cache = ProjectCache()
+
+    let dsCrackerCache = ConcurrentDictionary<_,_>()
+
+    let dsCrackerLoad = ProjectCracker.load dsCrackerCache
 
     let printOptions(options: FSharpProjectOptions) = 
         // This is long but it's useful
@@ -261,56 +267,46 @@ type ProjectManager(checker: FSharpChecker) =
         /// Analyze a project
         let analyzeFsproj(fsproj: FileInfo) = 
             dprintfn "Analyzing %s" fsproj.Name
-            let cracked = ProjectCracker.crack(fsproj)
-            // Convert to FSharpProjectOptions
-            let options = {
-                ExtraProjectInfo = None 
-                IsIncompleteTypeCheckEnvironment = false 
-                LoadTime = lastModified(fsproj)
-                OriginalLoadReferences = []
-                OtherOptions = 
-                    [|
-                        // Dotnet framework should be specified explicitly
-                        yield "--noframework"
-                        // Reference output of other projects
-                        for r in cracked.projectReferences do 
-                            let options = cache.Get(r, analyzeLater)
-                            yield "-r:" + options.resolved.Value.target.FullName
-                        // Reference target .dll for .csproj proejcts
-                        for r in cracked.otherProjectReferences do 
-                            yield "-r:" + r.FullName
-                        // Reference packages
-                        for r in cracked.packageReferences do 
-                            yield "-r:" + r.FullName
-                        // Direct dll references
-                        for r in cracked.directReferences do 
-                            yield "-r:" + r.FullName
-                    |]
-                ProjectFileName = fsproj.FullName 
-                ProjectId = None // This is apparently relevant to multi-targeting builds https://github.com/Microsoft/visualfsharp/pull/4918
-                ReferencedProjects = 
-                    [|
-                        for r in cracked.projectReferences do 
-                            let options = cache.Get(r, analyzeLater)
-                            yield options.resolved.Value.target.FullName, options.resolved.Value.options
-                    |]
-                SourceFiles = 
-                    [|
-                        for f in cracked.sources do 
-                            yield f.FullName
-                    |]
-                Stamp = None 
-                UnresolvedReferences = None 
-                UseScriptResolutionRules = false
-            }
-            // Log what we inferred
-            printOptions(options)
-            {
-                sources=cracked.sources
-                options=options 
-                target=cracked.target
-                errors=match cracked.error with None -> [] | Some(e) -> [Conversions.errorAtTop(e)]
-            }
+            let result = dsCrackerLoad fsproj.FullName
+            match result with
+            | Ok (options, compileFiles, log) ->
+                let target = 
+                    match options.ExtraProjectInfo with
+                    | Some opt -> 
+                        let extraData = unbox<ExtraProjectInfoData>(opt)
+                        match extraData.ProjectSdkType with 
+                        | ProjectCracker.ProjectSdkType.DotnetSdk sdkProj -> sdkProj.TargetPath
+                    | None -> failwith "Expected target"
+
+                // options.OtherOptions
+                printOptions(options)
+                {
+                    sources = compileFiles |> List.map (fun s -> FileInfo s) 
+                    options = options 
+                    target = FileInfo(target)
+                    errors=[]
+                }
+
+            | Error e -> 
+                {
+                    sources = []
+                    options = {
+                        ExtraProjectInfo = None 
+                        IsIncompleteTypeCheckEnvironment = false 
+                        LoadTime = lastModified(fsproj)
+                        OriginalLoadReferences = []
+                        OtherOptions = [||]
+                        ProjectFileName = fsproj.FullName 
+                        ProjectId = None // This is apparently relevant to multi-targeting builds https://github.com/Microsoft/visualfsharp/pull/4918
+                        ReferencedProjects = [||]
+                        SourceFiles = [||]
+                        Stamp = None 
+                        UnresolvedReferences = None 
+                        UseScriptResolutionRules = false
+                    } 
+                    target = fsproj
+                    errors = [Conversions.errorAtTop(e)]
+                }
         // Direct to analyzeFsx or analyzeFsproj, depending on type
         if fsprojOrFsx.Name.EndsWith(".fsx") then 
             {file=fsprojOrFsx; resolved=lazy(analyzeFsx(fsprojOrFsx))}
